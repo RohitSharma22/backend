@@ -3,12 +3,23 @@ import { ApiError } from "../utils/ApiError.js";
 import { User } from "../models/user.models.js";
 import { uploadOnCloudinary } from "../utils/cloudinary.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
+import jwt from "jsonwebtoken";
 
 const generateAccessAndRefereshTokens = async (userId) => {
   try {
     const user = await User.findById(userId);
+    console.log("Generate access and Refresh Token (user) ", user);
+
     const accessToken = user.generateAccessToken();
+    console.log(
+      "Generate access and Refresh Token (accessToken) ",
+      accessToken
+    );
     const refreshToken = user.generateRefreshToken();
+    console.log(
+      "Generate access and Refresh Token (refreshToken) ",
+      refreshToken
+    );
 
     user.refreshToken = refreshToken;
     await user.save({ validateBeforeSave: false });
@@ -47,12 +58,23 @@ const registerUser = asyncHandler(async (req, res) => {
     $or: [{ username }, { email }],
   });
 
+  console.log(`Existed User ${existedUser}`);
+
   if (existedUser) {
     throw new ApiError(409, "User with username or email already exists");
   }
-  console.log("Request Body", req.files);
-  const avatarLocalPath = req.files?.avatar[0]?.path;
-  //const coverImagelocalPath = req.files?.coverImage[0]?.path;
+  //Getting error here
+  // console.log(`Checking require fields - ${req.files.avatar[0]}`);
+  if (!req.files || !req.files.avatar) {
+    throw new ApiError(400, "Avatar file is missing");
+  }
+
+  // Then check if the avatar array has at least one element
+  if (req.files.avatar.length === 0) {
+    throw new ApiError(400, "Avatar file is missing");
+  }
+  const avatarLocalPath = req.files.avatar[0].path;
+  // const coverImagelocalPath = req.files?.coverImage[0]?.path;
   console.log("avatarLocalPath ->", avatarLocalPath);
   if (!avatarLocalPath)
     throw new ApiError(400, "Avatar Local Path is required");
@@ -66,7 +88,6 @@ const registerUser = asyncHandler(async (req, res) => {
     coverImagelocalPath = req.files.coverImage[0].path;
   }
 
-  //Getting error here
   const avatar = await uploadOnCloudinary(avatarLocalPath);
   const coverImage = await uploadOnCloudinary(coverImagelocalPath);
   console.log("avatar ->", avatar);
@@ -101,15 +122,18 @@ const loginUser = asyncHandler(async (req, res) => {
   // send cookie
 
   const { email, username, password } = req.body;
-  if (!username || !email)
-    throw new ApiError(400, "username or email is required");
+  if (!email) throw new ApiError(400, "username or email is required");
   const user = await User.findOne({
     $or: [{ username }, { email }],
   });
-
-  if (!username || !email) throw new ApiError(404, "User does not exist");
+  console.log(
+    ` Email - ${email} , Username - ${username} , Password - ${password}`
+  );
+  if (!email) throw new ApiError(404, "User does not exist");
 
   const isPasswordValid = await user.isPasswordCorrect(password);
+
+  console.log(`isPasswordValid - ${isPasswordValid}`);
 
   if (!isPasswordValid) throw new ApiError(401, "Password incorrect");
 
@@ -153,4 +177,44 @@ const logoutUser = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, {}, "User logged out"));
 });
 
-export { registerUser, loginUser, logoutUser };
+const refreshAccessToken = asyncHandler(async (req, res) => {
+  try {
+    const incomingRefreshToken =
+      req.cookies.refreshToken || req.body.refreshToken;
+
+    if (!incomingRefreshToken) throw new ApiError(401, "Inauthorized request");
+    const decodedToken = jwt.verify(
+      incomingRefreshToken,
+      process.env.REFRESH_TOKEN_SECRET
+    );
+    const user = await User.findById(decodedToken?._id);
+    if (!user) throw new ApiError(401, "Invalid refresh token");
+
+    if (incomingRefreshToken !== user?.refreshToken)
+      throw new ApiError(401, "Refresh token is expired or used");
+
+    const options = {
+      httpOnly: true,
+      secure: true,
+    };
+
+    const { accessToken, newRefreshToken } =
+      await generateAccessAndRefereshTokens(user._id);
+
+    return res
+      .status(200)
+      .cookie("accessToken", accessToken, options)
+      .cookie("refreshToken", newRefreshToken, options)
+      .json(
+        new ApiResponse(
+          200,
+          { accessToken, refreshToken: newRefreshToken },
+          "Access token refreshed successfully"
+        )
+      );
+  } catch (error) {
+    throw new ApiError(401, error?.message || "Invalid refresh token");
+  }
+});
+
+export { registerUser, loginUser, logoutUser, refreshAccessToken };
